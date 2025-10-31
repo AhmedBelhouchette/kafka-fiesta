@@ -1,3 +1,10 @@
+# SPECIFICATIONS
+
+Fichier de spécifications fonctionnelles et non-fonctionnelles.
+- Compléter les cas d'utilisation
+- Décrire les topics Kafka attendus
+- Définir SLAs et objectifs modèle ML
+
 # Spécifications Techniques des Structures de Données
 
 Ce document est la **source de vérité unique** pour toutes les structures de données du projet. Tout le code doit impérativement respecter ces schémas pour assurer l'interopérabilité des microservices.

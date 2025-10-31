@@ -42,3 +42,11 @@ Le **job de Streaming** devra être capable de calculer **exactement les mêmes 
 ## 4. Prédiction en Streaming
 
 Le job de streaming chargera le modèle sauvegardé une seule fois au démarrage pour des prédictions rapides.
+
+# ML Model Design
+
+Structure du modèle de prédiction de maintenance :
+- Features candidates
+- Pipeline d'entraînement
+- Métriques et évaluation
+- Export du modèle

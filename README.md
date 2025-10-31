@@ -1,4 +1,4 @@
-# Projet de Maintenance et Optimisation Industrielle Intelligente
+# Projet de Maintenance et Optimisation Industrielle
 
 Ce projet vise à construire une plateforme Big Data complète pour la supervision d'un parc de machines industrielles.
 
@@ -36,3 +36,14 @@ Un seul fichier `docker-compose.yml` peut démarrer tout l'écosystème (Kafka, 
 *   **[SPECIFICATIONS.md](SPECIFICATIONS.md) :** **À LIRE EN PREMIER.** Contient le contrat de données : la structure exacte de tous les topics Kafka, des tables InfluxDB et du stockage HDFS.
 *   **[ML_MODEL_DESIGN.md](ML_MODEL_DESIGN.md) :** Guide pour la conception et l'entraînement du modèle de maintenance prédictive.
 *   **[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) :** Proposition de l'arborescence des fichiers du projet pour organiser le code.
+
+# projet-maintenance-industrielle
+
+Projet de démonstration pour maintenance industrielle (structure initiale).
+
+Structure principale:
+- docker-compose.yml : stack infra (Kafka etc.)
+- notebooks/ : notebooks d'exploration
+- src/ : code source (simulators, spark_jobs, services)
+
+Voir PROJECT_STRUCTURE.md pour l'arborescence recommandée.
