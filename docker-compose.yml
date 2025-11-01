@@ -1,16 +1,18 @@
 services:
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.5.0
+    image: confluentinc/cp-zookeeper:7.3.0
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    networks:
+      - kafka-network
     restart: unless-stopped
 
   kafka:
-    image: confluentinc/cp-kafka:7.5.0
+    image: confluentinc/cp-kafka:7.3.0
     container_name: kafka
     depends_on:
       - zookeeper
@@ -25,6 +27,10 @@ services:
       KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - kafka-network
     restart: unless-stopped
 
   kafdrop:
@@ -36,29 +42,39 @@ services:
       - "9000:9000"
     environment:
       KAFKA_BROKERCONNECT: "kafka:29092"
+    networks:
+      - kafka-network
     restart: unless-stopped
 
   spark-master:
-    image: apache/spark:latest
+    build: .                                      # ← Build depuis le Dockerfile
     container_name: spark-master
     environment:
       - SPARK_NO_DAEMONIZE=true
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host 0.0.0.0 --port 7077 --webui-port 8080
+    volumes:
+      - ./:/opt/spark-work-dir                    # ← Pour modifier les fichiers en temps réel
     ports:
       - "4040:8080"
       - "7077:7077"
+    networks:
+      - kafka-network
     restart: unless-stopped
 
   spark-worker:
-    image: apache/spark:latest
+    build: .                                      # ← Build depuis le Dockerfile
     container_name: spark-worker
     depends_on:
       - spark-master
     environment:
       - SPARK_NO_DAEMONIZE=true
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077 --webui-port 8081
+    volumes:
+      - ./:/opt/spark-work-dir                    # ← Pour modifier les fichiers en temps réel
     ports:
       - "4041:8081"
+    networks:
+      - kafka-network
     restart: unless-stopped
 
   influxdb:
@@ -75,22 +91,32 @@ services:
       DOCKER_INFLUXDB_INIT_ORG: mon-usine
       DOCKER_INFLUXDB_INIT_BUCKET: donnees-usine
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: my-super-secret-token
+    networks:
+      - kafka-network
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:9.2.0
+    image: grafana/grafana:latest
     container_name: grafana
-    depends_on:
-      - influxdb
     ports:
       - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_INSTALL_PLUGINS=
     volumes:
-      - grafana_data:/var/lib/grafana
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - influxdb
+    networks:
+      - kafka-network
     restart: unless-stopped
+
+networks:
+  kafka-network:
+    driver: bridge
 
 volumes:
   influxdb_data:
-  grafana_data:
-
-#All containers inside this file can talk to each other by their service names
-#all these services are running simultaneously in separate isolated containers.d
+  grafana-data:
+  kafka_data:

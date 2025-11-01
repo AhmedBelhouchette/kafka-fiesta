@@ -1,3 +1,8 @@
+"""
+Enhanced Data Simulator - Écrit dans Kafka ET InfluxDB
+Compatible avec le Resource Manager d'Ahmed
+"""
+
 import json
 import time
 import random
@@ -5,73 +10,78 @@ import logging
 from datetime import datetime, timezone
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class RealSensorSimulator:
-    def __init__(self, bootstrap_servers='localhost:9092'):
-        self.bootstrap_servers = bootstrap_servers
+    def __init__(self, bootstrap_servers='localhost:9092', 
+                 influxdb_url='http://localhost:8086',
+                 influxdb_token='my-super-secret-token',
+                 influxdb_org='mon-usine',
+                 influxdb_bucket='donnees-usine'):
         
+        self.bootstrap_servers = bootstrap_servers
+
         # Initialize Kafka Producer
         self.producer = KafkaProducer(
             bootstrap_servers=[self.bootstrap_servers],
             value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode('utf-8'),
-            acks='all',  # Wait for all replicas to acknowledge
-            retries=3,   # Retry on failure
+            acks='all',
+            retries=3,
             request_timeout_ms=30000,
             max_block_ms=30000
         )
-        
+
+        # Initialize InfluxDB Client
+        self.influx_client = InfluxDBClient(
+            url=influxdb_url,
+            token=influxdb_token,
+            org=influxdb_org
+        )
+        self.influx_write_api = self.influx_client.write_api(write_options=SYNCHRONOUS)
+        self.influx_bucket = influxdb_bucket
+
+        # Machines compatibles avec le Resource Manager d'Ahmed
         self.machines = [
-            "POMPE-01", "POMPE-02", "POMPE-03",
-            "COMPRESSEUR-01", "COMPRESSEUR-02", 
-            "MOTEUR-01", "MOTEUR-02",
-            "VENTILATEUR-01", "MIXER-01"
+            "POMPE-1", "POMPE-2", "POMPE-3", "POMPE-4", "POMPE-5"
         ]
-        
+
         # Machine-specific base values for realistic data
         self.machine_profiles = {
-            "POMPE": {"temp_range": (40, 80), "pressure_range": (100, 200), "vibration_range": (0.5, 2.0)},
-            "COMPRESSEUR": {"temp_range": (50, 90), "pressure_range": (150, 300), "vibration_range": (1.0, 3.0)},
-            "MOTEUR": {"temp_range": (60, 100), "pressure_range": (0, 50), "vibration_range": (1.5, 4.0)},
-            "VENTILATEUR": {"temp_range": (30, 60), "pressure_range": (0, 20), "vibration_range": (0.8, 2.5)},
-            "MIXER": {"temp_range": (45, 75), "pressure_range": (80, 180), "vibration_range": (2.0, 5.0)}
+            "POMPE": {"temp_range": (65, 85), "pressure_range": (100, 200), "vibration_range": (1.5, 3.5)}
         }
-        
-        logger.info(f"✅ Real Sensor Simulator initialized for Kafka: {bootstrap_servers}")
-        logger.info(f"📊 Monitoring {len(self.machines)} machines")
-    
+
+        logger.info(f"✅ Enhanced Sensor Simulator initialized")
+        logger.info(f"   📡 Kafka: {bootstrap_servers}")
+        logger.info(f"   💾 InfluxDB: {influxdb_url}")
+        logger.info(f"   🔧 Machines: {len(self.machines)}")
+
     def generate_sensor_data(self, machine_id):
-        """Generate realistic sensor data with occasional anomalies"""
+        """Generate realistic sensor data"""
         machine_type = machine_id.split('-')[0]
         profile = self.machine_profiles.get(machine_type, self.machine_profiles["POMPE"])
-        
-        # 97% chance of normal operation, 3% chance of abnormal
-        if random.random() > 0.03:
-            state = "en_marche" if random.random() > 0.08 else "arret"
-            
-            # Normal operating ranges
-            workload = random.uniform(60.0, 95.0)
-            power_consumption = random.uniform(12.0, 22.0)
+
+        # 95% chance of normal operation
+        if random.random() > 0.05:
+            state = "operationnelle"
+            workload = random.uniform(30.0, 80.0)
+            power_consumption = random.uniform(8.0, 15.0)
             vibration = random.uniform(profile["vibration_range"][0], profile["vibration_range"][1])
             temperature = random.uniform(profile["temp_range"][0], profile["temp_range"][1])
             pressure = random.uniform(profile["pressure_range"][0], profile["pressure_range"][1])
         else:
-            # Simulate abnormal conditions
+            # Abnormal conditions
             state = random.choice(["maintenance", "panne"])
-            workload = random.uniform(0.0, 15.0)
-            power_consumption = random.uniform(1.0, 8.0)
-            
-            # Abnormal readings
-            vibration = random.uniform(5.0, 12.0)  # High vibration = potential failure
-            temperature = random.uniform(95.0, 130.0)  # Overheating
-            pressure = random.uniform(
-                profile["pressure_range"][1] + 30, 
-                profile["pressure_range"][1] + 120
-            )
-        
+            workload = random.uniform(0.0, 20.0)
+            power_consumption = random.uniform(1.0, 5.0)
+            vibration = random.uniform(5.0, 10.0)
+            temperature = random.uniform(90.0, 120.0)
+            pressure = random.uniform(250, 350)
+
         return {
             "machine_id": machine_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -80,66 +90,96 @@ class RealSensorSimulator:
             "consommation_electrique": round(power_consumption, 2),
             "vibration": round(vibration, 2),
             "temperature": round(temperature, 2),
-            "pression": round(pressure, 2)
+            "pression": round(pressure, 2),
+            "nombre_taches": random.randint(0, 3)
         }
-    
+
+    def send_to_kafka(self, data):
+        """Send data to Kafka"""
+        try:
+            future = self.producer.send('donnees-capteurs', data)
+            return True
+        except KafkaError as e:
+            logger.error(f"❌ Kafka error for {data['machine_id']}: {e}")
+            return False
+
+    def send_to_influxdb(self, data):
+        """Send data to InfluxDB (measurement: etat_machines)"""
+        try:
+            point = Point("etat_machines") \
+                .tag("machine_id", data["machine_id"]) \
+                .field("temperature", data["temperature"]) \
+                .field("vibration", data["vibration"]) \
+                .field("charge_travail", data["charge_travail"]) \
+                .field("consommation_electrique", data["consommation_electrique"]) \
+                .field("etat", data["etat"]) \
+                .field("nombre_taches", data["nombre_taches"]) \
+                .time(datetime.utcnow())
+            
+            self.influx_write_api.write(bucket=self.influx_bucket, record=point)
+            return True
+        except Exception as e:
+            logger.error(f"❌ InfluxDB error for {data['machine_id']}: {e}")
+            return False
+
     def send_sensor_data(self):
-        """Send sensor data for all machines"""
+        """Send sensor data for all machines to Kafka AND InfluxDB"""
         try:
             for machine in self.machines:
                 data = self.generate_sensor_data(machine)
+
+                # Send to both Kafka and InfluxDB
+                kafka_ok = self.send_to_kafka(data)
+                influx_ok = self.send_to_influxdb(data)
+
+                status = "✅" if (kafka_ok and influx_ok) else "⚠️"
+                emoji = "🟢" if data['etat'] == "operationnelle" else "🟡" if data['etat'] == "maintenance" else "🔴"
                 
-                # Send to Kafka with error handling
-                future = self.producer.send('donnees-capteurs', data)
-                
-                # Optional: Wait for send confirmation
-                # record_metadata = future.get(timeout=10)
-                
-                logger.info(f"📨 Sent data for {machine} - État: {data['etat']} - Charge: {data['charge_travail']}%")
-                
-            # Flush to ensure all messages are sent
+                logger.info(f"{status} {emoji} {machine}: temp={data['temperature']}°C, charge={data['charge_travail']}%, état={data['etat']}")
+
+            # Flush Kafka
             self.producer.flush()
-            
-        except KafkaError as e:
-            logger.error(f"❌ Kafka error: {e}")
+
         except Exception as e:
             logger.error(f"❌ Unexpected error: {e}")
-    
-    def run_continuous_simulation(self, interval=5):
+
+    def run_continuous_simulation(self, interval=10):
         """Run continuous simulation"""
-        logger.info(f"🚀 Starting continuous simulation (interval: {interval}s)")
+        logger.info(f"🚀 Starting enhanced simulation (interval: {interval}s)")
+        logger.info("   📡 Writing to Kafka: donnees-capteurs")
+        logger.info("   💾 Writing to InfluxDB: etat_machines")
         logger.info("Press Ctrl+C to stop...")
-        
+        logger.info("=" * 60)
+
         try:
+            cycle = 0
             while True:
                 start_time = time.time()
+                
+                logger.info(f"\n--- CYCLE #{cycle} - {datetime.now().strftime('%H:%M:%S')} ---")
                 self.send_sensor_data()
                 
-                # Calculate sleep time to maintain exact interval
                 processing_time = time.time() - start_time
                 sleep_time = max(0, interval - processing_time)
                 time.sleep(sleep_time)
                 
+                cycle += 1
+
         except KeyboardInterrupt:
-            logger.info("🛑 Simulation stopped by user")
+            logger.info("\n🛑 Simulation stopped by user")
         finally:
             self.producer.close()
-            logger.info("🔒 Kafka producer closed")
+            self.influx_client.close()
+            logger.info("🔒 Connections closed")
 
 if __name__ == "__main__":
-    # Test connection first
     try:
         simulator = RealSensorSimulator('localhost:9092')
-        
-        # Send one test message
-        test_data = simulator.generate_sensor_data("TEST-01")
-        future = simulator.producer.send('donnees-capteurs', test_data)
-        future.get(timeout=10)  # Wait for confirmation
         logger.info("✅ Connection test successful! Starting simulation...")
-        
-        # Run continuous simulation
-        simulator.run_continuous_simulation(interval=5)
-        
+        simulator.run_continuous_simulation(interval=10)
+
     except Exception as e:
         logger.error(f"❌ Failed to initialize: {e}")
-        logger.info("💡 Make sure Kafka is running and topics are created")
+        logger.info("💡 Make sure Kafka and InfluxDB are running")
+        import traceback
+        traceback.print_exc()
