@@ -1,16 +1,17 @@
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, window, rank, desc, lit
+from pyspark.sql.functions import from_json, col, rank, desc, lit
+from pyspark.sql.window import Window
 from pyspark.sql.types import StructType, StringType, FloatType, LongType, TimestampType
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 # --- Configuration ---
-KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
+KAFKA_BOOTSTRAP_SERVERS = "kafka:29092"
 CAPTEURS_TOPIC = "donnees-capteurs"
 COMMANDES_TOPIC = "commandes-machines"
 
-INFLUXDB_URL = "http://localhost:8086"
+INFLUXDB_URL = "http://influxdb:8086"
 INFLUXDB_TOKEN = "my-super-secret-token"
 INFLUXDB_ORG = "mon-usine"
 INFLUXDB_BUCKET = "donnees-usine"
@@ -38,7 +39,7 @@ def process_batch(batch_df, epoch_id):
         print("Batch vide, rien à traiter.")
         return
 
-    windowSpec = window.partitionBy("machine_id").orderBy(desc("timestamp"))
+    windowSpec = Window.partitionBy("machine_id").orderBy(desc("timestamp"))
     latest_machine_states = batch_df.withColumn("rank", rank().over(windowSpec)) \
                                     .filter(col("rank") == 1) \
                                     .select("machine_id", "etat", "charge_travail", "timestamp", "temperature", "vibration", "consommation_electrique")
