@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resource Manager - Ahmed Belhouchette</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <h1>🏭 Resource Manager Dashboard</h1>
+            <div class="header-info">
+                <span id="current-date">2025-11-02 12:00:00</span>
+                <span class="user-badge">👤 AhmedBelhouchette10</span>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <!-- CONTRÔLE DES SIMULATEURS -->
+        <section class="control-section">
+            <h2>🎮 CONTRÔLE DES SIMULATEURS</h2>
+            
+            <div class="simulators-grid">
+                <!-- Simulateur de Capteurs -->
+                <div class="simulator-card">
+                    <div class="simulator-header">
+                        <h3>📊 Simulateur de Capteurs</h3>
+                        <span class="simulator-status" id="capteurs-status">⚪ Arrêté</span>
+                    </div>
+                    
+                    <div class="simulator-controls">
+                        <div class="button-group">
+                            <button class="btn-start" onclick="startCapteursSimulator()">▶️ DÉMARRER</button>
+                            <button class="btn-stop" onclick="stopCapteursSimulator()">⏸️ ARRÊTER</button>
+                        </div>
+                        
+                        <div class="control-group">
+                            <label for="capteurs-frequency">⏱️ Fréquence (secondes):</label>
+                            <input type="range" id="capteurs-frequency" min="1" max="30" value="5" 
+                                   oninput="updateCapteursFrenquency(this.value)">
+                            <span id="capteurs-frequency-value">5s</span>
+                        </div>
+                        
+                        <div class="control-group">
+                            <label for="capteurs-error-rate">⚠️ Taux d'erreurs (%):</label>
+                            <input type="range" id="capteurs-error-rate" min="0" max="100" value="15" 
+                                   oninput="updateCapteursErrorRate(this.value)">
+                            <span id="capteurs-error-rate-value">15%</span>
+                        </div>
+                        
+                        <div class="control-group">
+                            <label for="force-error-machine">🔴 Forcer une panne:</label>
+                            <select id="force-error-machine">
+                                <option value="POMPE-1">POMPE-1</option>
+                                <option value="POMPE-2">POMPE-2</option>
+                                <option value="POMPE-3">POMPE-3</option>
+                                <option value="POMPE-4">POMPE-4</option>
+                                <option value="POMPE-5">POMPE-5</option>
+                            </select>
+                            <button class="btn-danger" onclick="forceError()">⚡ FORCER PANNE</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Simulateur de Production -->
+                <div class="simulator-card">
+                    <div class="simulator-header">
+                        <h3>📦 Simulateur de Production</h3>
+                        <span class="simulator-status" id="production-status">⚪ Arrêté</span>
+                    </div>
+                    
+                    <div class="simulator-controls">
+                        <div class="button-group">
+                            <button class="btn-start" onclick="startProductionSimulator()">▶️ DÉMARRER</button>
+                            <button class="btn-stop" onclick="stopProductionSimulator()">⏸️ ARRÊTER</button>
+                        </div>
+                        
+                        <div class="control-group">
+                            <label for="production-frequency">⏱️ Fréquence (secondes):</label>
+                            <input type="range" id="production-frequency" min="5" max="60" value="10" 
+                                   oninput="updateProductionFrequency(this.value)">
+                            <span id="production-frequency-value">10s</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- STATISTIQUES -->
+        <section class="stats-section">
+            <h2>📊 Statistiques Globales</h2>
+            <div class="stats-grid">
+                <div class="stat-card disponible">
+                    <div class="stat-icon">🟢</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-disponible">0</div>
+                        <div class="stat-label">Disponibles</div>
+                    </div>
+                </div>
+                
+                <div class="stat-card assignee">
+                    <div class="stat-icon">🔵</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-assignee">0</div>
+                        <div class="stat-label">Assignées</div>
+                    </div>
+                </div>
+                
+                <div class="stat-card pause">
+                    <div class="stat-icon">🟡</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-pause">0</div>
+                        <div class="stat-label">En Pause</div>
+                    </div>
+                </div>
+                
+                <div class="stat-card arret">
+                    <div class="stat-icon">🔴</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-arret">0</div>
+                        <div class="stat-label">En Arrêt</div>
+                    </div>
+                </div>
+                
+                <div class="stat-card tasks">
+                    <div class="stat-icon">✅</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="stat-completed">0</div>
+                        <div class="stat-label">Tâches Complétées</div>
+                    </div>
+                </div>
+                
+                <div class="stat-card queue">
+                    <div class="stat-icon">📋</div>
+                    <div class="stat-content">
+                        <div class="stat-value" id="queue-size">0</div>
+                        <div class="stat-label">En File d'Attente</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- MACHINES -->
+        <section class="machines-section">
+            <h2>🤖 État des Machines</h2>
+            <div class="machines-grid" id="machines-grid">
+                <!-- Les machines seront chargées dynamiquement -->
+                <p class="loading">Chargement des machines...</p>
+            </div>
+        </section>
+
+        <!-- TÂCHES -->
+        <section class="tasks-section">
+            <h2>📦 Gestion des Tâches</h2>
+            
+            <div class="tasks-container">
+                <div class="task-column">
+                    <h3>📋 File d'Attente</h3>
+                    <div class="task-queue" id="task-queue">
+                        <p class="loading">Chargement des tâches...</p>
+                    </div>
+                </div>
+                
+                <div class="task-column">
+                    <h3>⚙️ En Cours</h3>
+                    <div class="tasks-in-progress" id="tasks-in-progress">
+                        <p class="loading">Chargement des tâches...</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>© 2025 Resource Manager - Développé par Ahmed Belhouchette (@AhmedBelhouchette10)</p>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
