@@ -33,14 +33,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configuration - DOCKER
-KAFKA_BOOTSTRAP = "kafka:29092"
-INFLUXDB_URL = "http://influxdb:8086"
-INFLUXDB_TOKEN = "my-super-secret-token"
-INFLUXDB_ORG = "mon-usine"
-INFLUXDB_BUCKET = "donnees-usine"
+# Configuration - from environment (see .env.example). Defaults target the
+# docker-compose network; override for host runs.
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
+INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://influxdb:8086")
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "my-super-secret-token")
+INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "mon-usine")
+INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "donnees-usine")
 
-BATCH_INTERVAL = 30  # secondes
+BATCH_INTERVAL = int(os.getenv("BATCH_INTERVAL", "30"))  # secondes (demo: lower for a snappier loop)
 
 class ResourceManager:
     """Resource Manager Principal - Architecture Modulaire"""
@@ -61,6 +62,15 @@ class ResourceManager:
         self.kafka_service = KafkaService(
             bootstrap_servers=KAFKA_BOOTSTRAP
         )
+
+        # Persistent consumers (created once) — polled every batch so no tasks or
+        # alerts are dropped between batches (the previous per-batch consumers were lossy).
+        self.task_consumer = self.kafka_service.create_consumer(
+            ['plan-de-production'], 'resource-manager-tasks'
+        )
+        self.alert_consumer = self.kafka_service.create_consumer(
+            ['alertes-ml'], 'resource-manager-alerts'
+        )
         
         # Initialiser les managers
         logger.info("🔧 Initialisation des managers...")
@@ -71,7 +81,10 @@ class ResourceManager:
         # Service de maintenance (réparations)
         self.maintenance_service = MaintenanceService(
             bootstrap_servers=KAFKA_BOOTSTRAP,
-            callback=self.alert_manager.repair_machine
+            callback=self.alert_manager.repair_machine,
+            break_callback=lambda mid: self._handle_ml_alert({
+                "machine_id": mid, "action": "ARRETER", "severity": "HAUTE", "metrics": {}
+            })
         )
         self.maintenance_service.start()
         
@@ -124,8 +137,13 @@ class ResourceManager:
             self.task_manager.add_task(task_data)
         
         # 4. Lire les alertes ML depuis Kafka
+        # Les alertes ML organiques (stress capteurs) provoquent un COOLDOWN qui se
+        # rétablit tout seul. Seule une panne FORCÉE (FORCER_ARRET via la
+        # maintenance) met la machine en ARRET jusqu'à réparation manuelle.
         new_alerts = self._read_alerts_from_kafka()
         for alert_data in new_alerts:
+            if alert_data.get('action') == 'ARRETER':
+                alert_data['action'] = 'PAUSE'  # downgrade organic stop -> cooldown
             self._handle_ml_alert(alert_data)
         
         # 5. Vérifier retour d'urgence - ✅ LECTURE DEPUIS KAFKA
@@ -141,7 +159,15 @@ class ResourceManager:
         
         # 6. Assigner les tâches en attente
         self._assign_pending_tasks()
-        
+
+        # 6b. Réconcilier le statut : une machine qui détient encore une tâche et
+        # n'est pas bloquée doit être ASSIGNEE (corrige l'état après un cooldown).
+        for mid, task in list(self.task_manager.assigned_tasks.items()):
+            if not self.alert_manager.is_machine_blocked(mid):
+                self.influx_service.write_machine_status(
+                    mid, MachineState.ASSIGNEE, f"Tâche {task.task_id}"
+                )
+
         # 7. Vérifier machines inactives - ✅ LECTURE DEPUIS KAFKA
         self.machine_manager.check_idle_machines(
             self.task_manager.assigned_tasks,
@@ -155,45 +181,25 @@ class ResourceManager:
         self._write_global_stats()
     
     def _read_tasks_from_kafka(self):
-        """Lit les nouvelles tâches depuis Kafka"""
+        """Poll the persistent tasks consumer (plan-de-production, SPECIFICATIONS.md)."""
         try:
-            consumer = self.kafka_service.create_consumer(
-                ['plan-production'],
-                'resource-manager-tasks'
-            )
-            
-            messages = consumer.poll(timeout_ms=1000)
             tasks = []
-            
-            for topic_partition, records in messages.items():
+            for _, records in self.task_consumer.poll(timeout_ms=500).items():
                 for record in records:
                     tasks.append(record.value)
-            
-            consumer.close()
             return tasks
-        
         except Exception as e:
             logger.error(f"❌ Erreur lecture tâches: {e}")
             return []
-    
+
     def _read_alerts_from_kafka(self):
-        """Lit les alertes ML depuis Kafka"""
+        """Poll the persistent ML-alerts consumer (alertes-ml)."""
         try:
-            consumer = self.kafka_service.create_consumer(
-                ['alertes-ml'],
-                'resource-manager-alerts'
-            )
-            
-            messages = consumer.poll(timeout_ms=1000)
             alerts = []
-            
-            for topic_partition, records in messages.items():
+            for _, records in self.alert_consumer.poll(timeout_ms=500).items():
                 for record in records:
                     alerts.append(record.value)
-            
-            consumer.close()
             return alerts
-        
         except Exception as e:
             logger.error(f"❌ Erreur lecture alertes: {e}")
             return []
@@ -207,9 +213,10 @@ class ResourceManager:
         
         # Ajouter l'alerte
         self.alert_manager.add_alert(machine_id, action, severity, str(details))
-        
-        # Si machine avait une tâche, gérer l'interruption
-        if machine_id in self.task_manager.assigned_tasks:
+
+        # Un COOLDOWN (PAUSE) garde la tâche (elle reprend après) ; seul un ARRET
+        # réel interrompt et réassigne la tâche.
+        if action != 'PAUSE' and machine_id in self.task_manager.assigned_tasks:
             self.task_manager.handle_machine_failure(machine_id)
     
     def _assign_pending_tasks(self):
@@ -230,7 +237,12 @@ class ResourceManager:
                 self.task_manager.assigned_tasks,
                 self.task_manager.get_queue_size()
             )
-            
+
+            # Exclure les machines bloquées par une alerte active (source de vérité
+            # en mémoire). ARRET reste bloquée jusqu'à réparation manuelle ;
+            # PAUSE se libère via check_expired_pauses au bout du timeout.
+            available = [m for m in available if not self.alert_manager.is_machine_blocked(m)]
+
             if not available:
                 logger.warning(f"   ❌ Aucune machine disponible")
                 logger.warning(f"   📥 {self.task_manager.get_queue_size()} tâche(s) en file d'attente")

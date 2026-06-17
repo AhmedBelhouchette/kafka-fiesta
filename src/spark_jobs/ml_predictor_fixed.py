@@ -16,7 +16,7 @@ import os
 import uuid
 
 # ✅ CONFIGURATION CORRIGÉE
-KAFKA_BOOTSTRAP = 'localhost:9092'
+KAFKA_BOOTSTRAP = os.getenv('KAFKA_BOOTSTRAP', 'kafka:29092')
 TOPIC_INPUT = 'donnees-capteurs'
 TOPIC_OUTPUT = 'alertes-ml'
 
@@ -53,61 +53,32 @@ class MLMaintenancePredictor:
         return True
 
     def compute_features(self, data, machine_id):
-        """Calcule les features temporelles"""
-        if machine_id not in self.feature_buffer:
-            self.feature_buffer[machine_id] = []
-
-        self.feature_buffer[machine_id].append({
-            'timestamp': datetime.now(),
+        """Compute the 12-feature vector. MUST match scripts/train_model.py."""
+        buf = self.feature_buffer.setdefault(machine_id, [])
+        buf.append({
             'vibration': data['vibration'],
             'temperature': data['temperature'],
-            'pression': data['pression']
+            'pression': data['pression'],
         })
+        if len(buf) > 60:
+            del buf[:-60]
 
-        # Garder 10 minutes de données
-        cutoff_time = datetime.now().timestamp() - 600
-        self.feature_buffer[machine_id] = [
-            m for m in self.feature_buffer[machine_id]
-            if m['timestamp'].timestamp() > cutoff_time
+        win = buf[-12:]  # ~1 min window, matches WINDOW in train_model.py
+        vib = np.array([m['vibration'] for m in win], dtype=float)
+        temp = np.array([m['temperature'] for m in win], dtype=float)
+        pres = np.array([m['pression'] for m in win], dtype=float)
+
+        def slope(s):
+            return float(np.polyfit(np.arange(len(s)), s, 1)[0]) if len(s) > 1 else 0.0
+
+        return [
+            data['vibration'], data['temperature'], data['pression'],
+            data['consommation_electrique'], data['charge_travail'],
+            float(vib.mean()), float(temp.mean()),
+            float(vib.std()) if len(vib) > 1 else 0.0,
+            float(pres.std()) if len(pres) > 1 else 0.0,
+            slope(temp), slope(vib), float(temp.max()),
         ]
-
-        buffer = self.feature_buffer[machine_id]
-        now = datetime.now().timestamp()
-
-        if len(buffer) > 1:
-            buffer_1min = [m for m in buffer if now - m['timestamp'].timestamp() <= 60]
-
-            vibrations_1min = [m['vibration'] for m in buffer_1min] if buffer_1min else [data['vibration']]
-
-            features = {
-                'vibration': data['vibration'],
-                'temperature': data['temperature'],
-                'pression': data['pression'],
-                'consommation_electrique': data['consommation_electrique'],
-                'charge_travail': data['charge_travail'],
-                'vibration_moyenne_1min': np.mean(vibrations_1min),
-                'temperature_moyenne_1min': np.mean([m['temperature'] for m in buffer_1min]) if buffer_1min else data['temperature'],
-                'pression_moyenne_1min': np.mean([m['pression'] for m in buffer_1min]) if buffer_1min else data['pression'],
-                'vibration_ecart_type_1min': np.std(vibrations_1min) if len(vibrations_1min) > 1 else 0.0,
-                'pression_ecart_type_1min': np.std([m['pression'] for m in buffer_1min]) if len(buffer_1min) > 1 else 0.0,
-                'temperature_max_1min': np.max([m['temperature'] for m in buffer_1min]) if buffer_1min else data['temperature']
-            }
-        else:
-            features = {
-                'vibration': data['vibration'],
-                'temperature': data['temperature'],
-                'pression': data['pression'],
-                'consommation_electrique': data['consommation_electrique'],
-                'charge_travail': data['charge_travail'],
-                'vibration_moyenne_1min': data['vibration'],
-                'temperature_moyenne_1min': data['temperature'],
-                'pression_moyenne_1min': data['pression'],
-                'vibration_ecart_type_1min': 0.0,
-                'pression_ecart_type_1min': 0.0,
-                'temperature_max_1min': data['temperature']
-            }
-
-        return features
 
     def predict(self, data, machine_id):
         """Prédit le type de panne"""
@@ -124,22 +95,7 @@ class MLMaintenancePredictor:
                 return ('aucune', 0, 0.99)
 
         features = self.compute_features(data, machine_id)
-
-        feature_vector = np.array([[
-            features['vibration'],
-            features['temperature'],
-            features['pression'],
-            features['consommation_electrique'],
-            features['charge_travail'],
-            features['vibration_moyenne_1min'],
-            features['temperature_moyenne_1min'],
-            features['pression_moyenne_1min'],
-            features['vibration_ecart_type_1min'],
-            features['pression_ecart_type_1min'],
-            features['temperature_max_1min']
-        ]])
-
-        feature_vector_scaled = self.scaler.transform(feature_vector)
+        feature_vector_scaled = self.scaler.transform(np.array([features]))
         prediction = self.model.predict(feature_vector_scaled)[0]
         probabilities = self.model.predict_proba(feature_vector_scaled)[0]
 

@@ -12,9 +12,10 @@ logger = logging.getLogger(__name__)
 class MaintenanceService:
     """Écoute les demandes de maintenance et répare les machines"""
     
-    def __init__(self, bootstrap_servers, callback):
+    def __init__(self, bootstrap_servers, callback, break_callback=None):
         self.bootstrap_servers = bootstrap_servers
         self.callback = callback
+        self.break_callback = break_callback
         self.running = False
         self.thread = None
     
@@ -60,8 +61,9 @@ class MaintenanceService:
             
             elif action_type == 'FORCER_ARRET':
                 logger.warning(f"⛔ Action reçue: FORCER ARRÊT {machine_id}")
-                # À implémenter si besoin
-            
+                if self.break_callback:
+                    self.break_callback(machine_id)
+
             else:
                 logger.warning(f"⚠️  Action inconnue: {action_type}")
         

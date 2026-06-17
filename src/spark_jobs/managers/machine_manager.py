@@ -6,8 +6,6 @@ Gestionnaire des machines et de leur disponibilité
 from datetime import datetime
 import logging
 from models.machine_state import MachineState, IDLE_SHUTDOWN_SECONDS
-from kafka import KafkaConsumer
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -24,34 +22,11 @@ class MachineManager:
         
         logger.info(f"🔧 Machines: {', '.join(machines)}")
     
-    def get_machine_states_from_kafka(self):
-        """✅ LIT LES ÉTATS DES MACHINES DEPUIS KAFKA (Single Source of Truth)"""
-        machine_states = {}
-        
-        try:
-            consumer = KafkaConsumer(
-                'statuts-machines',
-                bootstrap_servers='kafka:29092',
-                value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-                auto_offset_reset='latest',
-                consumer_timeout_ms=2000,
-                group_id='resource-manager-state-reader',
-                enable_auto_commit=False
-            )
-            
-            # Lire les derniers états
-            for message in consumer:
-                data = message.value
-                machine_id = data.get('machine_id')
-                status = data.get('status')
-                machine_states[machine_id] = status
-            
-            consumer.close()
-        
-        except Exception as e:
-            logger.warning(f"⚠️  Erreur lecture états Kafka: {e}")
-        
-        return machine_states
+    def get_machine_states(self):
+        """Read machine statuses from InfluxDB — the real single source of truth
+        (it's where every status write lands). Machines with no recorded status
+        default to DISPONIBLE in the callers below."""
+        return self.influx_service.get_all_machine_statuses()
     
     def get_available_machines(self, assigned_tasks, task_queue_size):
         """
@@ -59,7 +34,7 @@ class MachineManager:
         Gère le réveil des machines en IDLE si besoin
         """
         # Lire les états depuis Kafka
-        kafka_states = self.get_machine_states_from_kafka()
+        kafka_states = self.get_machine_states()
         
         available = []
         
@@ -106,7 +81,7 @@ class MachineManager:
             return  # Pas d'arrêt si travail en attente
         
         # Lire les états depuis Kafka
-        kafka_states = self.get_machine_states_from_kafka()
+        kafka_states = self.get_machine_states()
         
         now = datetime.now()
         newly_idle = []
@@ -178,7 +153,7 @@ class MachineManager:
         }
         
         # Lire les états depuis Kafka
-        kafka_states = self.get_machine_states_from_kafka()
+        kafka_states = self.get_machine_states()
         
         for machine_id in self.machines:
             if machine_id in assigned_tasks:

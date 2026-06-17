@@ -1,10 +1,18 @@
-from src.spark_jobs.common.spark_session import get_spark_session
+"""
+Production orchestrator entrypoint.
 
-def main():
-    spark = get_spark_session("production_orchestrator")
-    # Placeholder: orchestration logic (read topics, trigger jobs)
-    print("Production orchestrator started (placeholder).")
-    spark.stop()
+Launches the Spark Structured Streaming archival pipeline (Kafka -> Parquet data
+lake + InfluxDB hot layer). Kept as a thin entrypoint so it runs the same way
+whether started directly (`python production_orchestrator.py`, local Spark) or
+pointed at the standalone cluster via SPARK_MASTER=spark://spark-master:7077.
+"""
+import os
+import sys
+
+# Make the sibling `streaming` package importable when run as a script.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from streaming.archival_job import main  # noqa: E402
 
 if __name__ == "__main__":
     main()

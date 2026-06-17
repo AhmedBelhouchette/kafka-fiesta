@@ -16,6 +16,7 @@ from datetime import datetime
 from kafka import KafkaProducer
 from influxdb_client import InfluxDBClient
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def init_connections():
     if kafka_producer is None:
         try:
             kafka_producer = KafkaProducer(
-                bootstrap_servers='localhost:9092',
+                bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP", "kafka:29092"),
                 value_serializer=lambda v: json.dumps(v).encode('utf-8')
             )
             logger.info("✅ Kafka Producer PERMANENT initialisé")
@@ -46,9 +47,9 @@ def init_connections():
     if influx_client is None:
         try:
             influx_client = InfluxDBClient(
-                url="http://localhost:8086",
-                token="my-super-secret-token",
-                org="mon-usine"
+                url=os.getenv("INFLUXDB_URL", "http://influxdb:8086"),
+                token=os.getenv("INFLUXDB_TOKEN", "my-super-secret-token"),
+                org=os.getenv("INFLUXDB_ORG", "mon-usine")
             )
             influx_query_api = influx_client.query_api()
             logger.info("✅ InfluxDB Client PERMANENT initialisé")
@@ -63,16 +64,19 @@ simulator_states = {
     "capteurs": {
         "running": False,
         "thread": None,
-        "frequency": 5,
-        "error_rate": 0.15
+        "frequency": int(os.getenv("SENSOR_INTERVAL", "5")),
+        "error_rate": float(os.getenv("CAPTEURS_ERROR_RATE", "0.08"))
     },
     "production": {
         "running": False,
         "thread": None,
-        "frequency": 10,
+        "frequency": int(os.getenv("PRODUCTION_INTERVAL", "10")),
         "task_counter": 1040
     }
 }
+
+# Task durations in minutes (short by default so the lifecycle is watchable).
+TASK_MINUTES = [int(x) for x in os.getenv("DEMO_TASK_MINUTES", "1,2,3").split(",") if x.strip()] or [1, 2, 3]
 
 # Modèles Pydantic
 class SimulatorConfig(BaseModel):
@@ -85,86 +89,76 @@ class ForceErrorRequest(BaseModel):
 
 # ==================== BOUCLES DE SIMULATION ====================
 
+def _machine_status(machine_id):
+    """Latest status of a machine from InfluxDB (statut_machines)."""
+    if not influx_query_api:
+        return "DISPONIBLE"
+    try:
+        q = (f'from(bucket:"donnees-usine") |> range(start:-15m) '
+             f'|> filter(fn:(r)=>r["_measurement"]=="statut_machines") '
+             f'|> filter(fn:(r)=>r["machine_id"]=="{machine_id}") '
+             f'|> filter(fn:(r)=>r["_field"]=="statut") |> last()')
+        for table in influx_query_api.query(q):
+            for record in table.records:
+                return record.get_value()
+    except Exception as e:
+        logger.warning(f"⚠️  statut {machine_id}: {e}")
+    return "DISPONIBLE"
+
+
 def capteurs_simulation_loop():
+    """Sensor simulation driven by a per-machine DEGRADATION process.
+
+    Each working machine accumulates wear; the sensor readings are the same noisy
+    functions of wear used to train the model (scripts/train_model.py), so the
+    failure predictor sees real rising trends and flags machines *before* failure.
+    A COOLDOWN acts as preventive maintenance (wear drops); a repair resets wear.
+    The error-rate slider controls the probability of a degradation 'shock'.
     """
-    Boucle de simulation des capteurs
-    Utilise le Producer Kafka PERMANENT
-    """
-    logger.info("🚀 Thread simulateur capteurs démarré")
-    
+    logger.info("🚀 Thread simulateur capteurs (dégradation) démarré")
     machines = ["POMPE-1", "POMPE-2", "POMPE-3", "POMPE-4", "POMPE-5"]
-    cycle = 0
-    
+    wear = {m: random.uniform(0.0, 0.1) for m in machines}
+    prev = {m: "DISPONIBLE" for m in machines}
+
+    def clip(x, lo, hi):
+        return max(lo, min(hi, x))
+
     while simulator_states["capteurs"]["running"]:
-        cycle += 1
-        logger.info(f"\n📊 CYCLE #{cycle}")
-        
-        for machine_id in machines:
-            try:
-                # Lire statut depuis InfluxDB
-                status = "DISPONIBLE"
-                if influx_query_api:
-                    query = f'''
-                    from(bucket: "donnees-usine")
-                        |> range(start: -10m)
-                        |> filter(fn: (r) => r["_measurement"] == "statut_machines")
-                        |> filter(fn: (r) => r["machine_id"] == "{machine_id}")
-                        |> filter(fn: (r) => r["_field"] == "statut")
-                        |> last()
-                    '''
-                    result = influx_query_api.query(query)
-                    
-                    for table in result:
-                        for record in table.records:
-                            status = record.get_value()
-                            break
-                
-                # N'envoyer QUE si machine active
-                if status in ["DISPONIBLE", "ASSIGNEE"]:
-                    # Générer données
-                    error_rate = simulator_states["capteurs"]["error_rate"]
-                    force_error = random.random() < error_rate
-                    
-                    if force_error:
-                        temperature = random.uniform(80, 95)
-                        charge = random.uniform(75, 95)
-                    else:
-                        temperature = random.uniform(55, 75)
-                        charge = random.uniform(25, 70)
-                    
-                    data = {
-                        "machine_id": machine_id,
-                        "timestamp": datetime.now().isoformat(),
-                        "temperature": round(temperature, 2),
-                        "vibration": round(random.uniform(0.5, 3.0), 3),
-                        "pression": round(random.uniform(3.5, 6.5), 2),
-                        "consommation_electrique": round(random.uniform(80, 150), 2),
-                        "charge_travail": round(charge, 2)
-                    }
-                    
-                    # Envoyer via Kafka PERMANENT
-                    if kafka_producer:
-                        kafka_producer.send('donnees-capteurs', value=data)
-                    
-                    temp_emoji = "🔥" if temperature > 80 else "🌡️"
-                    charge_emoji = "⚡" if charge > 75 else "💪"
-                    
-                    logger.info(
-                        f"  ✅ {machine_id:10} ({status:10}): "
-                        f"{temp_emoji} T={temperature:5.1f}°C  "
-                        f"{charge_emoji} C={charge:5.1f}%"
-                    )
-                else:
-                    logger.info(f"  ⏸️  {machine_id:10} ({status:10}): Pas d'envoi")
-            
-            except Exception as e:
-                logger.warning(f"⚠️  Erreur {machine_id}: {e}")
-        
+        shock_rate = simulator_states["capteurs"]["error_rate"]
+        for mid in machines:
+            status = _machine_status(mid)
+            if prev[mid] == "ARRET" and status != "ARRET":
+                wear[mid] = 0.0          # repaired -> as-new
+            prev[mid] = status
+
+            if status in ("DISPONIBLE", "ASSIGNEE"):
+                inc = random.gammavariate(2.0, 0.010)        # noisy wear increment
+                if random.random() < shock_rate:
+                    inc += random.uniform(0.06, 0.14)        # degradation shock
+                wear[mid] = clip(wear[mid] + inc, 0.0, 1.6)
+                w = wear[mid]
+                load = clip(random.uniform(0.35, 0.85) + 0.1 * random.gauss(0, 1), 0.05, 1.0)
+                data = {
+                    "machine_id": mid,
+                    "timestamp": datetime.now().isoformat(),
+                    "temperature": round(58 + 28 * w + 9 * load + random.gauss(0, 4), 2),
+                    "vibration": round(0.7 + 2.6 * (w ** 1.6) + (0.4 + 0.8 * w) * abs(random.gauss(0, 1)), 3),
+                    "pression": round(5.0 + 1.1 * w + random.gauss(0, 0.4), 2),
+                    "consommation_electrique": round(95 + 32 * w + 16 * load + random.gauss(0, 8), 2),
+                    "charge_travail": round(clip(100 * load + random.gauss(0, 3), 0, 100), 2),
+                }
+                if kafka_producer:
+                    kafka_producer.send('donnees-capteurs', value=data)
+                logger.info(f"  ✅ {mid:8} wear={w:.2f}  T={data['temperature']:5.1f}°C  V={data['vibration']:.2f}")
+            elif status == "PAUSE":
+                wear[mid] = max(0.0, wear[mid] * 0.6)         # cooldown = light maintenance
+                logger.info(f"  ❄️  {mid:8} cooldown -> wear={wear[mid]:.2f}")
+            # ARRET: broken, emit nothing
+
         if kafka_producer:
             kafka_producer.flush()
-        
         time.sleep(simulator_states["capteurs"]["frequency"])
-    
+
     logger.info("🛑 Thread simulateur capteurs terminé")
 
 
@@ -176,33 +170,30 @@ def production_simulation_loop():
     logger.info("🚀 Thread simulateur production démarré")
     
     products = {
-        "Produit A": {"duration": 30, "priority": "NORMALE"},
-        "Produit B": {"duration": 45, "priority": "NORMALE"},
-        "Produit C": {"duration": 60, "priority": "NORMALE"},
-        "Produit D": {"duration": 90, "priority": "HAUTE"},
-        "Produit E": {"duration": 120, "priority": "HAUTE"}
+        "Product A": "NORMALE", "Product B": "NORMALE", "Product C": "NORMALE",
+        "Product D": "HAUTE", "Product E": "HAUTE",
     }
-    
+
     while simulator_states["production"]["running"]:
         # Générer tâche
         simulator_states["production"]["task_counter"] += 1
         task_id = f"TASK-{simulator_states['production']['task_counter']}{random.choice(['A','B','C','D','E','F'])}"
-        
+
         product_name = random.choice(list(products.keys()))
-        product_info = products[product_name]
-        
+        duration = random.choice(TASK_MINUTES)
+
         task = {
             "task_id": task_id,
             "product": product_name,
-            "duration_minutes": product_info["duration"],
-            "priority": product_info["priority"],
+            "duration_minutes": duration,
+            "priority": products[product_name],
             "timestamp": datetime.now().isoformat(),
             "status": "EN_ATTENTE"
         }
         
         # Envoyer via Kafka PERMANENT
         if kafka_producer:
-            kafka_producer.send('plan-production', value=task)
+            kafka_producer.send('plan-de-production', value=task)
             kafka_producer.flush()
         
         priority_emoji = "🔴" if task["priority"] == "HAUTE" else "🟡"
@@ -365,3 +356,42 @@ async def get_all_simulators_status():
             "frequency": simulator_states["production"]["frequency"]
         }
     }
+
+
+@router.post("/capteurs/force-error")
+async def force_error(req: ForceErrorRequest):
+    """Force a breakdown: emit a burst of extreme sensor readings for a machine
+    so the ML predictor flags it and the orchestrator stops it (ARRET)."""
+    if not kafka_producer:
+        raise HTTPException(status_code=503, detail="Kafka non disponible")
+
+    mid = req.machine_id
+    # Route through the orchestrator's persistent maintenance listener (reliable),
+    # the same channel as Repair. A forced breakdown is a hard fault: ARRET until repair.
+    kafka_producer.send('actions-maintenance', value={
+        "action": "FORCER_ARRET",
+        "machine_id": mid,
+        "timestamp": datetime.now().isoformat(),
+    })
+    kafka_producer.flush()
+    logger.warning(f"🔴 Panne forcée sur {mid}")
+    return {"success": True, "message": f"Breakdown forced on {mid}"}
+
+
+def autostart_simulators():
+    """Start both generators on boot so the floor is live (and the buttons control them)."""
+    if os.getenv("AUTO_START_SIMULATORS", "true").lower() not in ("1", "true", "yes"):
+        return
+    try:
+        if not simulator_states["capteurs"]["running"]:
+            simulator_states["capteurs"]["running"] = True
+            threading.Thread(target=capteurs_simulation_loop, daemon=True).start()
+        if not simulator_states["production"]["running"]:
+            simulator_states["production"]["running"] = True
+            threading.Thread(target=production_simulation_loop, daemon=True).start()
+        logger.info("✅ Simulateurs auto-démarrés")
+    except Exception as e:
+        logger.error(f"❌ Auto-start error: {e}")
+
+
+autostart_simulators()

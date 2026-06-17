@@ -38,13 +38,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def no_cache_for_ui(request, call_next):
+    """Serve the dashboard HTML/CSS/JS without caching so UI updates always show."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 # ==================== CONFIGURATION ====================
 
-KAFKA_BOOTSTRAP = "localhost:9092"
-INFLUXDB_URL = "http://localhost:8086"
-INFLUXDB_TOKEN = "my-super-secret-token"
-INFLUXDB_ORG = "mon-usine"
-INFLUXDB_BUCKET = "donnees-usine"
+# From environment (see .env.example). Defaults target the docker-compose
+# network; override (e.g. KAFKA_BOOTSTRAP=localhost:9092) for host runs.
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
+INFLUXDB_URL = os.getenv("INFLUXDB_URL", "http://influxdb:8086")
+INFLUXDB_TOKEN = os.getenv("INFLUXDB_TOKEN", "my-super-secret-token")
+INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", "mon-usine")
+INFLUXDB_BUCKET = os.getenv("INFLUXDB_BUCKET", "donnees-usine")
 
 # ==================== KAFKA PRODUCER ====================
 
@@ -121,10 +135,12 @@ async def get_machines():
             '''
             
             # ===== QUERY 2: MÉTRIQUES (température, charge) =====
+            # etat_machines is the live measurement written by the Spark
+            # streaming job and the simulators (donnees_capteurs never existed).
             query_metrics = f'''
             from(bucket: "{INFLUXDB_BUCKET}")
-                |> range(start: -2m)
-                |> filter(fn: (r) => r["_measurement"] == "donnees_capteurs")
+                |> range(start: -5m)
+                |> filter(fn: (r) => r["_measurement"] == "etat_machines")
                 |> filter(fn: (r) => r["machine_id"] == "{machine_id}")
                 |> filter(fn: (r) => r["_field"] == "temperature" or r["_field"] == "charge_travail")
                 |> last()
@@ -140,13 +156,16 @@ async def get_machines():
                 |> last()
             '''
             
-            # ===== QUERY 4: TÂCHE ASSIGNÉE =====
+            # ===== QUERY 4: TÂCHE ASSIGNÉE (+ durée pour calculer la progression) =====
+            # group by machine_id+_field so last() collapses across task_ids and
+            # returns the SINGLE most recent assignment (not the last per task).
             query_task = f'''
             from(bucket: "{INFLUXDB_BUCKET}")
-                |> range(start: -1h)
+                |> range(start: -2h)
                 |> filter(fn: (r) => r["_measurement"] == "assignations")
                 |> filter(fn: (r) => r["machine_id"] == "{machine_id}")
-                |> filter(fn: (r) => r["_field"] == "statut" and r["_value"] == "EN_COURS")
+                |> filter(fn: (r) => r["_field"] == "duration_minutes" or r["_field"] == "product_name")
+                |> group(columns: ["machine_id", "_field"])
                 |> last()
             '''
             
@@ -178,34 +197,59 @@ async def get_machines():
                     elif field == "charge_travail":
                         charge = record.get_value()
             
-            # Calcul temps restant pause (10 minutes = 600s)
+            # Calcul temps restant pause (env PAUSE_TIMEOUT_SECONDS)
+            pause_timeout = int(os.getenv("PAUSE_TIMEOUT_SECONDS", "600"))
             if status == "PAUSE":
                 for table in pause_result:
                     for record in table.records:
                         pause_start_ts = record.get_value()
-                        now = datetime.now().timestamp()
-                        elapsed = now - pause_start_ts
-                        time_remaining = max(0, int(600 - elapsed))
+                        elapsed = datetime.now().timestamp() - pause_start_ts
+                        time_remaining = max(0, int(pause_timeout - elapsed))
                         break
-            
-            # Tâche assignée
+
+            # Tâche assignée + progression (depuis la dernière assignation)
+            product = None
+            task_duration_s = None
+            task_started_ts = None
             for table in task_result:
                 for record in table.records:
-                    task_id = record.values.get("task_id")
-                    break
-            
+                    task_id = record.values.get("task_id") or task_id
+                    if record.get_field() == "product_name":
+                        product = record.get_value()
+                    elif record.get_field() == "duration_minutes":
+                        task_duration_s = float(record.get_value() or 0) * 60
+                        rt = record.get_time()
+                        if rt:
+                            task_started_ts = rt.timestamp()
+
+            progress = None
+            task_time_remaining = None
+            if status == "ASSIGNEE" and task_duration_s and task_started_ts:
+                elapsed = datetime.now().timestamp() - task_started_ts
+                progress = max(0.0, min(1.0, elapsed / task_duration_s))
+                task_time_remaining = max(0, int(task_duration_s - elapsed))
+            else:
+                # Not actively running a task: don't surface a stale assignment
+                task_id = None
+                product = None
+
             # Construire objet machine
             machine_obj = {
                 "id": machine_id,
                 "status": status,
                 "temperature": round(temperature, 1),
                 "charge": round(charge, 1),
-                "task": task_id
+                "task": task_id,
+                "product": product,
+                "progress": round(progress, 3) if progress is not None else None,
+                "task_started": task_started_ts if status == "ASSIGNEE" else None,
+                "task_duration": int(task_duration_s) if (task_duration_s and status == "ASSIGNEE") else None,
+                "task_time_remaining": task_time_remaining,
             }
-            
+
             if time_remaining is not None:
                 machine_obj["time_remaining"] = time_remaining
-            
+
             machines_data.append(machine_obj)
         
         client.close()
@@ -233,68 +277,69 @@ async def get_tasks():
         client = InfluxDBClient(url=INFLUXDB_URL, token=INFLUXDB_TOKEN, org=INFLUXDB_ORG)
         query_api = client.query_api()
         
-        # ===== QUERY 1: TÂCHES EN ATTENTE =====
-        query_queue = f'''
+        # ===== EN COURS: dernière assignation par machine (mesure 'assignations') =====
+        query_assign = f'''
         from(bucket: "{INFLUXDB_BUCKET}")
-            |> range(start: -1h)
-            |> filter(fn: (r) => r["_measurement"] == "taches")
-            |> filter(fn: (r) => r["_field"] == "statut" and r["_value"] == "EN_ATTENTE")
-            |> group(columns: ["task_id"])
-            |> last()
-        '''
-        
-        # ===== QUERY 2: TÂCHES EN COURS =====
-        query_in_progress = f'''
-        from(bucket: "{INFLUXDB_BUCKET}")
-            |> range(start: -1h)
+            |> range(start: -5m)
             |> filter(fn: (r) => r["_measurement"] == "assignations")
-            |> filter(fn: (r) => r["_field"] == "statut" and r["_value"] == "EN_COURS")
-            |> group(columns: ["task_id"])
+            |> filter(fn: (r) => r["_field"] == "product_name" or r["_field"] == "duration_minutes")
+            |> group(columns: ["machine_id", "task_id", "_field"])
             |> last()
         '''
-        
-        queue_result = query_api.query(query_queue)
-        progress_result = query_api.query(query_in_progress)
-        
-        queue = []
-        in_progress = []
-        
-        # Parser file d'attente
-        seen_tasks = set()
-        for table in queue_result:
+
+        # ===== FILE D'ATTENTE: taille réelle depuis resource_manager_stats =====
+        query_queue_size = f'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+            |> range(start: -10m)
+            |> filter(fn: (r) => r["_measurement"] == "resource_manager_stats")
+            |> filter(fn: (r) => r["_field"] == "in_queue")
+            |> last()
+        '''
+
+        tasks_by_id = {}            # task_id -> {id, machine, product, duration}
+        latest_per_machine = {}     # machine_id -> (time, task_id)
+        for table in query_api.query(query_assign):
             for record in table.records:
                 task_id = record.values.get("task_id")
-                if task_id and task_id not in seen_tasks:
-                    seen_tasks.add(task_id)
-                    queue.append({
-                        "id": task_id,
-                        "product": record.values.get("produit", "N/A"),
-                        "duration": int(record.values.get("duree_minutes", 0)),
-                        "priority": record.values.get("priorite", "NORMALE")
-                    })
-        
-        # Parser en cours
-        seen_progress = set()
-        for table in progress_result:
+                machine_id = record.values.get("machine_id")
+                if not task_id:
+                    continue
+                entry = tasks_by_id.setdefault(task_id, {
+                    "id": task_id, "machine": machine_id,
+                    "product": "N/A", "duration": 0,
+                })
+                if record.get_field() == "product_name":
+                    entry["product"] = record.get_value()
+                elif record.get_field() == "duration_minutes":
+                    entry["duration"] = int(record.get_value() or 0)
+                # Track the most recent task per machine
+                t = record.get_time()
+                if t and (machine_id not in latest_per_machine or t > latest_per_machine[machine_id][0]):
+                    latest_per_machine[machine_id] = (t, task_id)
+
+        # One current task per busy machine (a task may have moved machines after
+        # a failure/reassignment, so trust the machine key, not first-seen).
+        in_progress_list = []
+        for machine_id, (_, task_id) in latest_per_machine.items():
+            info = tasks_by_id.get(task_id, {})
+            in_progress_list.append({
+                "id": task_id,
+                "machine": machine_id,
+                "product": info.get("product", "N/A"),
+                "duration": info.get("duration", 0),
+            })
+
+        queue_size = 0
+        for table in query_api.query(query_queue_size):
             for record in table.records:
-                task_id = record.values.get("task_id")
-                if task_id and task_id not in seen_progress:
-                    seen_progress.add(task_id)
-                    in_progress.append({
-                        "id": task_id,
-                        "product": record.values.get("produit", "N/A"),
-                        "duration": int(record.values.get("duree_minutes", 0)),
-                        "machine": record.values.get("machine_id", "N/A"),
-                        "progress": 0.5,  # TODO: calculer vraie progression
-                        "time_remaining": 30  # TODO: calculer temps restant
-                    })
-        
+                queue_size = int(record.get_value() or 0)
+
         client.close()
-        
+
         return {
-            "queue": queue[:10],  # Limiter à 10
-            "in_progress": in_progress,
-            "queue_size": len(queue),
+            "queue": [],  # individual queued tasks live in the orchestrator's memory, not InfluxDB
+            "in_progress": in_progress_list,
+            "queue_size": queue_size,
             "timestamp": datetime.now().isoformat()
         }
         
@@ -343,8 +388,21 @@ async def get_stats():
                 if status in stats:
                     stats[status] += 1
         
+        # ===== QUERY: STATS RÉELLES DU RESOURCE MANAGER =====
+        # Real counters written by the Resource Manager each batch.
+        query_rms = f'''
+        from(bucket: "{INFLUXDB_BUCKET}")
+            |> range(start: -10m)
+            |> filter(fn: (r) => r["_measurement"] == "resource_manager_stats")
+            |> last()
+        '''
+        rms = {}
+        for table in query_api.query(query_rms):
+            for record in table.records:
+                rms[record.get_field()] = record.get_value()
+
         client.close()
-        
+
         return {
             "machines": {
                 "disponible": stats["DISPONIBLE"],
@@ -354,15 +412,15 @@ async def get_stats():
                 "idle": stats["IDLE"]
             },
             "tasks": {
-                "total": 150,
-                "completed": 140,
-                "interrupted": 5,
-                "in_queue": 3
+                "total": int(rms.get("total", 0)),
+                "completed": int(rms.get("completed", 0)),
+                "interrupted": int(rms.get("interrupted", 0)),
+                "in_queue": int(rms.get("in_queue", 0))
             },
             "alerts": {
-                "pauses_expired": 12,
-                "emergency_returns": 3,
-                "repairs": 2
+                "pauses_expired": int(rms.get("pauses_expired", 0)),
+                "emergency_returns": int(rms.get("emergency_returns", 0)),
+                "repairs": int(rms.get("repairs", 0))
             },
             "timestamp": datetime.now().isoformat()
         }

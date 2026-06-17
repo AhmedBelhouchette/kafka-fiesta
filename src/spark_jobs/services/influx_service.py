@@ -23,6 +23,29 @@ class InfluxService:
         
         logger.info(f"✅ InfluxDB connecté: {url}")
     
+    def get_all_machine_statuses(self):
+        """Latest status of every machine from the statut_machines measurement.
+
+        This is the real single source of truth for machine status (it's where
+        every write_machine_status lands), so availability is read from here.
+        """
+        statuses = {}
+        try:
+            query = f'''
+            from(bucket: "{self.bucket}")
+                |> range(start: -15m)
+                |> filter(fn: (r) => r["_measurement"] == "statut_machines")
+                |> filter(fn: (r) => r["_field"] == "statut")
+                |> group(columns: ["machine_id"])
+                |> last()
+            '''
+            for table in self.query_api.query(query):
+                for record in table.records:
+                    statuses[record.values.get("machine_id")] = record.get_value()
+        except Exception as e:
+            logger.error(f"❌ Erreur lecture statuts machines: {e}")
+        return statuses
+
     def get_machine_state(self, machine_id):
         """Récupère l'état actuel d'une machine depuis InfluxDB"""
         try:
