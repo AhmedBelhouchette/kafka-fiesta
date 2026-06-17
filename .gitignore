@@ -1,0 +1,49 @@
+# ---- Secrets / environment ----
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Virtual environments ----
+.sidahmed/
+venv/
+.venv/
+env/
+ENV/
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- Data lake / Spark / streaming runtime ----
+/data-lake/
+spark-warehouse/
+checkpoints/
+*.crc
+metastore_db/
+derby.log
+*.log
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
+*.swp
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
+desktop.ini

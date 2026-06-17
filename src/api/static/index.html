@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Factory Floor — Real-Time Orchestration</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-content">
+            <h1>🏭 Factory Floor — Live Orchestration</h1>
+            <div class="header-info">
+                <span id="current-date">—</span>
+                <a id="grafana-link" class="ext-link" target="_blank" rel="noopener" title="Open the full Grafana dashboards in a new tab">📊 Grafana ↗</a>
+                <span class="user-badge">⚡ accelerated demo time</span>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <!-- ===== KPI STRIP ===== -->
+        <section class="kpi-strip">
+            <div class="kpi" title="Pumps idle and ready to take the next task."><span class="kpi-dot disponible"></span><span class="kpi-value" id="stat-disponible">0</span><span class="kpi-label">Available</span></div>
+            <div class="kpi" title="Pumps currently processing a task."><span class="kpi-dot assignee"></span><span class="kpi-value" id="stat-assignee">0</span><span class="kpi-label">Running</span></div>
+            <div class="kpi" title="Pumps in cooldown — resting after stress, auto-resume when the timer ends."><span class="kpi-dot pause"></span><span class="kpi-value" id="stat-pause">0</span><span class="kpi-label">Cooldown</span></div>
+            <div class="kpi" title="Pumps broken down — they stay down until repaired."><span class="kpi-dot arret"></span><span class="kpi-value" id="stat-arret">0</span><span class="kpi-label">Down</span></div>
+            <div class="kpi" title="Tasks generated but waiting for a free pump."><span class="kpi-dot queue"></span><span class="kpi-value" id="queue-size">0</span><span class="kpi-label">Queued</span></div>
+            <div class="kpi" title="Tasks finished and shipped out."><span class="kpi-dot done"></span><span class="kpi-value" id="stat-completed">0</span><span class="kpi-label">Completed</span></div>
+        </section>
+
+        <!-- ===== THE FACTORY FLOOR ===== -->
+        <section class="floor">
+            <div class="floor-stage">
+                <!-- Generators -->
+                <div class="stage-col col-generators">
+                    <div class="col-title" title="Sources that feed the line. They emit events to Kafka.">Generators</div>
+                    <div class="gen-node" id="gen-production" title="Production generator — creates production orders that flow into the queue. Use Stop below to halt it; the queue then drains as pumps finish.">
+                        <div class="gen-icon">📦</div>
+                        <div class="gen-text"><strong>Production plan</strong><span id="gen-production-rate">—</span></div>
+                    </div>
+                    <div class="gen-node" id="gen-sensors" title="Sensor generator — streams temperature / load / vibration readings used for failure prediction.">
+                        <div class="gen-icon">📡</div>
+                        <div class="gen-text"><strong>Sensors</strong><span id="gen-sensors-rate">—</span></div>
+                    </div>
+                </div>
+
+                <!-- Inbound lane -->
+                <div class="stage-lane" aria-hidden="true"><div class="lane-flow"></div></div>
+
+                <!-- Queue -->
+                <div class="stage-col col-queue" title="Tasks waiting for a free pump. The orchestrator assigns them oldest-first, with high-priority tasks jumping ahead.">
+                    <div class="col-title">Queue</div>
+                    <div class="queue-stack" id="queue-stack"></div>
+                    <div class="queue-meta"><span id="queue-count">0</span> tasks</div>
+                </div>
+
+                <!-- Pumps -->
+                <div class="stage-col col-pumps">
+                    <div class="col-title">Pumps</div>
+                    <div class="pumps-grid" id="pumps">
+                        <p class="loading">Connecting to the production line…</p>
+                    </div>
+                </div>
+
+                <!-- Done -->
+                <div class="stage-col col-done" title="Finished tasks. When a pump fills its progress bar, the task ships here.">
+                    <div class="col-title">Completed</div>
+                    <div class="done-bin" id="done-bin">✅</div>
+                    <div class="done-meta"><span id="done-count">0</span> shipped</div>
+                </div>
+            </div>
+            <div class="fly-layer" id="fly-layer"></div>
+        </section>
+
+        <!-- ===== GRAFANA ===== -->
+        <section class="grafana-section">
+            <h2>📊 Grafana — time-series metrics <a id="grafana-link-2" class="ext-link" target="_blank" rel="noopener">open ↗</a></h2>
+            <iframe id="grafana-frame" title="Grafana dashboard" loading="lazy"></iframe>
+        </section>
+
+        <!-- ===== CONTROLS ===== -->
+        <section class="control-section">
+            <h2>🎮 Generator controls</h2>
+            <div class="simulators-grid">
+                <div class="simulator-card">
+                    <div class="simulator-header">
+                        <h3>📡 Sensor simulator</h3>
+                        <span class="simulator-status" id="capteurs-status">⚪ Idle</span>
+                    </div>
+                    <div class="simulator-controls">
+                        <div class="button-group">
+                            <button class="btn-start" onclick="startCapteursSimulator()">▶️ Start</button>
+                            <button class="btn-stop" onclick="stopCapteursSimulator()">⏸️ Stop</button>
+                        </div>
+                        <div class="control-group">
+                            <label for="capteurs-frequency">⏱️ Frequency (s)</label>
+                            <input type="range" id="capteurs-frequency" min="1" max="30" value="5" oninput="updateCapteursFrenquency(this.value)">
+                            <span id="capteurs-frequency-value">5s</span>
+                        </div>
+                        <div class="control-group">
+                            <label for="capteurs-error-rate">⚠️ Error rate (%)</label>
+                            <input type="range" id="capteurs-error-rate" min="0" max="100" value="4" oninput="updateCapteursErrorRate(this.value)">
+                            <span id="capteurs-error-rate-value">4%</span>
+                        </div>
+                        <div class="control-group">
+                            <label for="force-error-machine">🔴 Force a breakdown</label>
+                            <select id="force-error-machine">
+                                <option value="POMPE-1">POMPE-1</option>
+                                <option value="POMPE-2">POMPE-2</option>
+                                <option value="POMPE-3">POMPE-3</option>
+                                <option value="POMPE-4">POMPE-4</option>
+                                <option value="POMPE-5">POMPE-5</option>
+                            </select>
+                            <button class="btn-danger" onclick="forceError()">⚡ Force breakdown</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="simulator-card">
+                    <div class="simulator-header">
+                        <h3>📦 Production simulator</h3>
+                        <span class="simulator-status" id="production-status">⚪ Idle</span>
+                    </div>
+                    <div class="simulator-controls">
+                        <div class="button-group">
+                            <button class="btn-start" onclick="startProductionSimulator()">▶️ Start</button>
+                            <button class="btn-stop" onclick="stopProductionSimulator()">⏸️ Stop</button>
+                        </div>
+                        <div class="control-group">
+                            <label for="production-frequency">⏱️ Frequency (s)</label>
+                            <input type="range" id="production-frequency" min="5" max="60" value="15" oninput="updateProductionFrequency(this.value)">
+                            <span id="production-frequency-value">15s</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>Real-Time Factory Orchestration &amp; Monitoring — Kafka · Spark · InfluxDB · Grafana</p>
+    </footer>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

@@ -58,6 +58,7 @@ Ce document est la **source de vérité unique** pour toutes les structures de d
 - **Exemple :** `{"machine_id": "POMPE-04", "probabilite_panne": 0.92, "timestamp_detection": "2025-10-31T10:06:00.000Z"}`
 
 ---
+### topic de sortie 
 ### Topic: `alertes-energie`
 - **Rôle :** Publie les alertes de fuite ou de surconsommation.
 - **Format :** JSON
